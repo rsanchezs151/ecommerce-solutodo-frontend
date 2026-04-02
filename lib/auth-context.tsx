@@ -4,6 +4,19 @@ import { createContext, useContext, useState, useCallback, useEffect, type React
 import type { User, UserRole } from './types'
 import { dummyUsers } from './dummy-data'
 
+// Logger simple para desarrollo
+const log = {
+  info: (message: string, ...args: any[]) => console.log(`[Auth] ${message}`, ...args),
+  error: (message: string, ...args: any[]) => console.error(`[Auth] ${message}`, ...args),
+  warn: (message: string, ...args: any[]) => console.warn(`[Auth] ${message}`, ...args)
+}
+
+// Función para obtener el token de autenticación
+export const getAuthToken = (): string | null => {
+  if (typeof window === 'undefined') return null
+  return localStorage.getItem('zonalocal_token')
+}
+
 interface AuthContextType {
   user: User | null
   isLoading: boolean
@@ -42,39 +55,100 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(false)
   }, [])
 
+  // Función para encriptar el payload con AES
+  const encryptPayload = async (data: any): Promise<string> => {
+    try {
+      // Generar clave aleatoria para esta sesión
+      const key = await crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 },
+        true,
+        ['encrypt']
+      )
+      
+      // Exportar la clave a base64
+      const exportedKey = await crypto.subtle.exportKey('raw', key)
+      const keyBase64 = btoa(String.fromCharCode(...new Uint8Array(exportedKey)))
+      
+      // Encriptar los datos
+      const encoder = new TextEncoder()
+      const dataBuffer = encoder.encode(JSON.stringify(data))
+      
+      const iv = crypto.getRandomValues(new Uint8Array(12))
+      const encryptedData = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        dataBuffer
+      )
+      
+      // Combinar IV + datos encriptados
+      const combined = new Uint8Array(iv.length + encryptedData.byteLength)
+      combined.set(iv)
+      combined.set(new Uint8Array(encryptedData), iv.length)
+      
+      // Convertir a base64
+      const encryptedBase64 = btoa(String.fromCharCode(...combined))
+      
+      // Retornar clave + datos encriptados
+      return JSON.stringify({
+        key: keyBase64,
+        data: encryptedBase64
+      })
+    } catch (error) {
+      console.error('Error encrypting payload:', error)
+      throw error
+    }
+  }
+
   const login = useCallback(async (email: string, password: string) => {
     setIsLoading(true)
     
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 800))
-    
-    // Demo login - in production this would call an API
-    const foundUser = dummyUsers.find(u => u.email.toLowerCase() === email.toLowerCase())
-    
-    if (foundUser && password.length >= 6) {
-      setUser(foundUser)
-      localStorage.setItem('zonalocal_user', JSON.stringify(foundUser))
-      setIsLoading(false)
-      return { success: true }
-    }
-    
-    // Allow any login for demo with password "demo123"
-    if (password === 'demo123') {
-      const newUser: User = {
-        id: `user_${Date.now()}`,
-        email,
-        name: email.split('@')[0],
-        role: 'customer',
-        createdAt: new Date().toISOString()
+    try {
+      log.info('Login attempt for user: {}', email)
+      
+      // Encriptar el payload ANTES de enviarlo
+      const encryptedPayload = await encryptPayload({ email, password })
+      
+      const response = await fetch('http://localhost:8443/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        credentials: 'include',
+        body: encryptedPayload, // Payload ya encriptado
+      })
+      
+      if (!response.ok) {
+        throw new Error('Login failed')
       }
-      setUser(newUser)
-      localStorage.setItem('zonalocal_user', JSON.stringify(newUser))
+      
+      const data = await response.json()
+      
+      if (data.accessToken || data.token) {
+        const token = data.accessToken || data.token
+        const user: User = {
+          id: data.user.id,
+          email: data.user.email,
+          name: data.user.firstName + ' ' + data.user.lastName,
+          role: data.user.role.toLowerCase(),
+          createdAt: new Date().toISOString()
+        }
+        
+        setUser(user)
+        localStorage.setItem('zonalocal_user', JSON.stringify(user))
+        localStorage.setItem('zonalocal_token', token)
+        setIsLoading(false)
+        return { success: true }
+      } else {
+        setIsLoading(false)
+        return { success: false, error: 'Credenciales incorrectas' }
+      }
+      
+    } catch (error) {
+      console.error('Login error:', error)
       setIsLoading(false)
-      return { success: true }
+      return { success: false, error: 'Error de conexión con el servidor' }
     }
-    
-    setIsLoading(false)
-    return { success: false, error: 'Credenciales incorrectas. Usa "demo123" como contraseña para probar.' }
   }, [])
 
   const register = useCallback(async (data: RegisterData) => {
